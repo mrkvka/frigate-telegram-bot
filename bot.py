@@ -36,7 +36,20 @@ if not BOT_TOKEN:
 if not OWNER_CHAT_ID_RAW:
     print("FATAL: OWNER_CHAT_ID env var is required", file=sys.stderr)
     sys.exit(1)
-OWNER_CHAT_ID = int(OWNER_CHAT_ID_RAW)
+# OWNER_CHAT_ID может быть одним числом или списком через запятую/пробел:
+#   OWNER_CHAT_ID=279682015
+#   OWNER_CHAT_ID=279682015,590708179
+OWNER_CHAT_IDS = set()
+for part in OWNER_CHAT_ID_RAW.replace(";", ",").replace(" ", ",").split(","):
+    part = part.strip()
+    if part:
+        OWNER_CHAT_IDS.add(int(part))
+if not OWNER_CHAT_IDS:
+    print("FATAL: OWNER_CHAT_ID has no valid IDs", file=sys.stderr)
+    sys.exit(1)
+# Для обратной совместимости оставляем первый ID как "основного владельца"
+# (использовался где-то в ответах/логах).
+OWNER_CHAT_ID = next(iter(OWNER_CHAT_IDS))
 
 API = f"{TG_API_BASE}/bot{BOT_TOKEN}"
 
@@ -260,12 +273,14 @@ def event_watcher():
                         continue
                     # Дадим Frigate пару секунд на финализацию клипа.
                     time.sleep(CLIP_WAIT_SECS)
-                    log.info("auto-sending event id=%s label=%s end=%.0f",
-                             ev.get("id"), ev.get("label"), end_time)
-                    try:
-                        send_event(OWNER_CHAT_ID, ev, title="🚨 Новое событие")
-                    except Exception:
-                        log.exception("send_event failed for id=%s", ev.get("id"))
+                    log.info("auto-sending event id=%s label=%s end=%.0f to %d user(s)",
+                             ev.get("id"), ev.get("label"), end_time, len(OWNER_CHAT_IDS))
+                    for uid in OWNER_CHAT_IDS:
+                        try:
+                            send_event(uid, ev, title="🚨 Новое событие")
+                        except Exception:
+                            log.exception("send_event failed for id=%s uid=%s",
+                                          ev.get("id"), uid)
                     _last_sent_end_ts = end_time
         except Exception:
             log.exception("event_watcher iteration error")
@@ -288,7 +303,7 @@ def handle_update(update):
     if not msg:
         return
     chat_id = msg.get("chat", {}).get("id")
-    if chat_id != OWNER_CHAT_ID:
+    if chat_id not in OWNER_CHAT_IDS:
         log.warning("Unauthorized chat_id=%s user=%s", chat_id, msg.get("from"))
         tg_text(chat_id, "⛔ Доступ запрещён")
         return
@@ -321,8 +336,8 @@ def set_bot_commands():
 
 
 def main():
-    log.info("Frigate bot starting... Frigate=%s Owner=%s Camera=%s TG_API=%s auto_events=%s",
-             FRIGATE_URL, OWNER_CHAT_ID, CAMERA, TG_API_BASE, AUTO_EVENTS)
+    log.info("Frigate bot starting... Frigate=%s Owners=%s Camera=%s TG_API=%s auto_events=%s",
+             FRIGATE_URL, sorted(OWNER_CHAT_IDS), CAMERA, TG_API_BASE, AUTO_EVENTS)
     tg("deleteWebhook", drop_pending_updates=False)
     set_bot_commands()
 
