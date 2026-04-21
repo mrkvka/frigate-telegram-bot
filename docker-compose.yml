@@ -1,0 +1,23 @@
+services:
+  frigate-bot:
+    image: ghcr.io/mrkvka/frigate-telegram-bot:latest
+    container_name: frigate-bot
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      OWNER_CHAT_ID: ${OWNER_CHAT_ID}
+      FRIGATE_URL: ${FRIGATE_URL:-http://frigate:5000}
+      CAMERA: ${CAMERA:-front}
+      MAX_VIDEO_MB: ${MAX_VIDEO_MB:-45}
+    # Подключаемся к той же docker-сети что и frigate, чтобы резолвить hostname `frigate`
+    network_mode: service:frigate
+    depends_on:
+      - frigate
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Важно: этот compose рассчитан на использование в той же compose-дирректории
+# что и основной Frigate compose. Если Frigate запущен отдельно, см. README.md
