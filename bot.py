@@ -9,6 +9,7 @@ import sys
 import time
 import json
 import logging
+import threading
 import requests
 
 # ==== Конфиг (env) ====
@@ -22,6 +23,12 @@ MAX_VIDEO_MB = int(os.environ.get("MAX_VIDEO_MB", "45"))
 # заблокирован провайдером — тогда укажи свой Cloudflare Worker-прокси
 # (например, https://tg-api-proxy.<user>.workers.dev).
 TG_API_BASE = os.environ.get("TG_API_BASE", "https://api.telegram.org").strip().rstrip("/")
+# Авто-отправка новых событий: 1 = включено, 0 = только по команде /last
+AUTO_EVENTS = os.environ.get("AUTO_EVENTS", "1").strip() == "1"
+# Интервал опроса Frigate на новые события (сек)
+EVENT_POLL_SECS = int(os.environ.get("EVENT_POLL_SECS", "10"))
+# Сколько ждать готовности клипа после end_time (Frigate кодирует mp4 не моментально)
+CLIP_WAIT_SECS = int(os.environ.get("CLIP_WAIT_SECS", "5"))
 
 if not BOT_TOKEN:
     print("FATAL: BOT_TOKEN env var is required", file=sys.stderr)
@@ -171,6 +178,37 @@ def cmd_snapshot(chat_id):
     tg_send_photo(chat_id, r.content, caption=f"<b>📷 Снимок {CAMERA}</b>\n{ts}")
 
 
+def send_event(chat_id, ev, title="🎬 Событие"):
+    """Отправляет событие Frigate в Telegram (caption + clip.mp4)."""
+    eid = ev.get("id")
+    label = ev.get("label", "?")
+    cam = ev.get("camera", "?")
+    score = ev.get("top_score", ev.get("score", 0)) or 0
+    start = ev.get("start_time", 0)
+    end = ev.get("end_time") or (start + 10)
+    duration = int(end - start) if end else 0
+    dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start))
+
+    caption = (
+        f"<b>{title}</b>\n"
+        f"Метка: <b>{label}</b> ({score*100:.0f}%)\n"
+        f"Камера: {cam}\n"
+        f"Время: {dt}\n"
+        f"Длительность: ~{duration}с"
+    )
+
+    r2 = frigate_get(f"/api/events/{eid}/clip.mp4", stream=True, timeout=60)
+    if not r2:
+        tg_text(chat_id, caption + "\n\n❌ Клип недоступен")
+        return False
+    video_bytes = r2.content
+    if len(video_bytes) > MAX_VIDEO_MB * 1024 * 1024:
+        tg_text(chat_id, caption + f"\n\n⚠️ Клип слишком большой ({len(video_bytes)//1024//1024}MB)")
+        return False
+    tg_send_video(chat_id, video_bytes, caption=caption)
+    return True
+
+
 def cmd_last(chat_id):
     tg("sendChatAction", chat_id=chat_id, action="upload_video")
     r = frigate_get("/api/events?limit=1&has_clip=1")
@@ -182,36 +220,57 @@ def cmd_last(chat_id):
         if not events:
             tg_text(chat_id, "ℹ️ Нет событий с клипами")
             return
-        ev = events[0]
-        eid = ev.get("id")
-        label = ev.get("label", "?")
-        cam = ev.get("camera", "?")
-        score = ev.get("top_score", ev.get("score", 0)) or 0
-        start = ev.get("start_time", 0)
-        end = ev.get("end_time") or (start + 10)
-        duration = int(end - start) if end else 0
-        dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start))
-
-        caption = (
-            f"<b>🎬 Последнее событие</b>\n"
-            f"Метка: <b>{label}</b> ({score*100:.0f}%)\n"
-            f"Камера: {cam}\n"
-            f"Время: {dt}\n"
-            f"Длительность: ~{duration}с"
-        )
-
-        r2 = frigate_get(f"/api/events/{eid}/clip.mp4", stream=True, timeout=60)
-        if not r2:
-            tg_text(chat_id, caption + "\n\n❌ Клип недоступен")
-            return
-        video_bytes = r2.content
-        if len(video_bytes) > MAX_VIDEO_MB * 1024 * 1024:
-            tg_text(chat_id, caption + f"\n\n⚠️ Клип слишком большой ({len(video_bytes)//1024//1024}MB)")
-            return
-        tg_send_video(chat_id, video_bytes, caption=caption)
+        send_event(chat_id, events[0], title="🎬 Последнее событие")
     except Exception as e:
         log.exception("cmd_last error")
         tg_text(chat_id, f"❌ Ошибка: {e}")
+
+
+# ==== Auto-watcher новых событий ====
+# Timestamp последнего уже отправленного события (берётся из Frigate API).
+_last_sent_end_ts = 0.0
+
+
+def event_watcher():
+    """Фоновый поток: пулит Frigate на новые завершённые события и шлёт владельцу.
+    Запускается в отдельном daemon-thread'е, не блокирует основной long-polling."""
+    global _last_sent_end_ts
+
+    # При старте берём актуальное время как baseline, чтобы НЕ слать бэклог
+    # всех предыдущих событий при рестарте бота.
+    _last_sent_end_ts = time.time()
+    log.info("event_watcher started, baseline end_ts=%.0f poll=%ds",
+             _last_sent_end_ts, EVENT_POLL_SECS)
+
+    while True:
+        try:
+            # Frigate API: after=<ts> фильтрует события по end_time > ts.
+            r = frigate_get(
+                f"/api/events?has_clip=1&limit=20&after={int(_last_sent_end_ts)}",
+                timeout=15,
+            )
+            if r:
+                events = r.json() or []
+                # Frigate возвращает по убыванию времени — сортируем по возрастанию,
+                # чтобы слать в хронологическом порядке.
+                events.sort(key=lambda e: (e.get("end_time") or 0))
+                for ev in events:
+                    end_time = ev.get("end_time") or 0
+                    if end_time <= _last_sent_end_ts:
+                        continue
+                    # Дадим Frigate пару секунд на финализацию клипа.
+                    time.sleep(CLIP_WAIT_SECS)
+                    log.info("auto-sending event id=%s label=%s end=%.0f",
+                             ev.get("id"), ev.get("label"), end_time)
+                    try:
+                        send_event(OWNER_CHAT_ID, ev, title="🚨 Новое событие")
+                    except Exception:
+                        log.exception("send_event failed for id=%s", ev.get("id"))
+                    _last_sent_end_ts = end_time
+        except Exception:
+            log.exception("event_watcher iteration error")
+
+        time.sleep(EVENT_POLL_SECS)
 
 
 # ==== Диспатчер ====
@@ -262,10 +321,14 @@ def set_bot_commands():
 
 
 def main():
-    log.info("Frigate bot starting... Frigate=%s Owner=%s Camera=%s TG_API=%s",
-             FRIGATE_URL, OWNER_CHAT_ID, CAMERA, TG_API_BASE)
+    log.info("Frigate bot starting... Frigate=%s Owner=%s Camera=%s TG_API=%s auto_events=%s",
+             FRIGATE_URL, OWNER_CHAT_ID, CAMERA, TG_API_BASE, AUTO_EVENTS)
     tg("deleteWebhook", drop_pending_updates=False)
     set_bot_commands()
+
+    if AUTO_EVENTS:
+        t = threading.Thread(target=event_watcher, name="event-watcher", daemon=True)
+        t.start()
 
     offset = 0
     while True:
