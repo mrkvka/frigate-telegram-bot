@@ -18,6 +18,10 @@ FRIGATE_URL = os.environ.get("FRIGATE_URL", "http://frigate:5000").strip().rstri
 POLL_TIMEOUT = int(os.environ.get("POLL_TIMEOUT", "30"))
 CAMERA = os.environ.get("CAMERA", "front").strip()
 MAX_VIDEO_MB = int(os.environ.get("MAX_VIDEO_MB", "45"))
+# База Telegram API. Можно переопределить через TG_API_BASE, если api.telegram.org
+# заблокирован провайдером — тогда укажи свой Cloudflare Worker-прокси
+# (например, https://tg-api-proxy.<user>.workers.dev).
+TG_API_BASE = os.environ.get("TG_API_BASE", "https://api.telegram.org").strip().rstrip("/")
 
 if not BOT_TOKEN:
     print("FATAL: BOT_TOKEN env var is required", file=sys.stderr)
@@ -27,7 +31,7 @@ if not OWNER_CHAT_ID_RAW:
     sys.exit(1)
 OWNER_CHAT_ID = int(OWNER_CHAT_ID_RAW)
 
-API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+API = f"{TG_API_BASE}/bot{BOT_TOKEN}"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -258,7 +262,8 @@ def set_bot_commands():
 
 
 def main():
-    log.info("Frigate bot starting... Frigate=%s Owner=%s Camera=%s", FRIGATE_URL, OWNER_CHAT_ID, CAMERA)
+    log.info("Frigate bot starting... Frigate=%s Owner=%s Camera=%s TG_API=%s",
+             FRIGATE_URL, OWNER_CHAT_ID, CAMERA, TG_API_BASE)
     tg("deleteWebhook", drop_pending_updates=False)
     set_bot_commands()
 
