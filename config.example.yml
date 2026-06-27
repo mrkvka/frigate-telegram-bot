@@ -25,6 +25,14 @@ objects:
       min_score: 0.45
       threshold: 0.65
 
+review:
+  alerts:
+    labels:
+      - person
+      - car
+      - cat
+      - dog
+
 record:
   enabled: true
   continuous:

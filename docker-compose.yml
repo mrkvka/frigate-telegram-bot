@@ -1,7 +1,7 @@
 services:
   frigate-telegram-bot:
     build: .
-    image: frigate-telegram-bot:1.0.0
+    image: frigate-telegram-bot:1.1.0
     container_name: frigate-telegram-bot
     restart: unless-stopped
     healthcheck:

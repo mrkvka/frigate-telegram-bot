@@ -11,8 +11,8 @@ import requests
 from bot import __version__
 from bot.commands.handlers import CommandHandlers
 from bot.config import Settings
-from bot.events.service import EventService
-from bot.events.watcher import EventWatcher
+from bot.events.service import ReviewService
+from bot.events.watcher import ReviewWatcher
 from bot.frigate_client import FrigateClient
 from bot.logging_setup import setup_logging
 from bot.monitor.health import HealthMonitor
@@ -26,24 +26,25 @@ class BotApp:
         self._s = settings
         self._tg = TelegramClient(settings)
         self._frigate = FrigateClient(settings)
-        self._events = EventService(settings, self._tg, self._frigate)
-        self._commands = CommandHandlers(settings, self._tg, self._frigate, self._events)
+        self._reviews = ReviewService(settings, self._tg, self._frigate)
+        self._commands = CommandHandlers(settings, self._tg, self._frigate, self._reviews)
 
     def run(self) -> None:
         log.info(
-            "Frigate bot v%s starting... Frigate=%s Owners=%s Camera=%s TG=%s auto_events=%s",
+            "Frigate bot v%s starting... Frigate=%s Owners=%s Camera=%s TG=%s auto_reviews=%s severity=%s",
             __version__,
             self._s.frigate_url,
             sorted(self._s.owner_chat_ids),
             self._s.camera,
             self._s.tg_api_base,
-            self._s.auto_events,
+            self._s.auto_reviews,
+            self._s.review_severity,
         )
         self._tg.delete_webhook()
         self._tg.set_commands()
 
-        if self._s.auto_events:
-            EventWatcher(self._s, self._frigate, self._events).start_daemon()
+        if self._s.auto_reviews:
+            ReviewWatcher(self._s, self._frigate, self._reviews).start_daemon()
         if self._s.monitor_enabled:
             HealthMonitor(self._s, self._tg).start_daemon()
 

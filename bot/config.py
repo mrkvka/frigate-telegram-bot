@@ -35,12 +35,12 @@ class Settings:
     video_fix_crf: int
     video_fix_timeout: int
     rnnoise_model: str
-    auto_events: bool
-    event_poll_secs: int
+    auto_reviews: bool
+    review_poll_secs: int
+    review_severity: str
     clip_wait_secs: int
     clip_ready_timeout: int
     clip_ready_poll: int
-    event_merge_gap_secs: int
     send_video_retries: int
     send_video_retry_delay: float
     send_snapshot_on_missing_clip: bool
@@ -93,12 +93,12 @@ class Settings:
             video_fix_crf=int(os.environ.get("VIDEO_FIX_CRF", "23")),
             video_fix_timeout=int(os.environ.get("VIDEO_FIX_TIMEOUT", "240")),
             rnnoise_model=os.environ.get("RNNOISE_MODEL", "/frigate_config/rnnoise.rnnn").strip(),
-            auto_events=_env_bool("AUTO_EVENTS", "1"),
-            event_poll_secs=int(os.environ.get("EVENT_POLL_SECS", "10")),
+            auto_reviews=_env_bool("AUTO_REVIEWS", os.environ.get("AUTO_EVENTS", "1")),
+            review_poll_secs=int(os.environ.get("REVIEW_POLL_SECS", os.environ.get("EVENT_POLL_SECS", "10"))),
+            review_severity=os.environ.get("REVIEW_SEVERITY", "alert").strip().lower(),
             clip_wait_secs=int(os.environ.get("CLIP_WAIT_SECS", "5")),
             clip_ready_timeout=int(os.environ.get("CLIP_READY_TIMEOUT", "90")),
             clip_ready_poll=int(os.environ.get("CLIP_READY_POLL", "5")),
-            event_merge_gap_secs=int(os.environ.get("EVENT_MERGE_GAP_SECS", "30")),
             send_video_retries=int(os.environ.get("SEND_VIDEO_RETRIES", "5")),
             send_video_retry_delay=float(os.environ.get("SEND_VIDEO_RETRY_DELAY", "8")),
             send_snapshot_on_missing_clip=_env_bool("SEND_SNAPSHOT_ON_MISSING_CLIP", "1"),

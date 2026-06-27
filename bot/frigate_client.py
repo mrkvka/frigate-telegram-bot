@@ -28,16 +28,22 @@ class FrigateClient:
             log.error("Frigate %s error: %s", path, e)
             return None
 
-    def wait_for_clip(self, event_id: str, timeout: int | None = None) -> bytes | None:
+    def wait_for_recording_clip(
+        self,
+        camera: str,
+        start_ts: float,
+        end_ts: float,
+        timeout: int | None = None,
+    ) -> bytes | None:
         timeout = self._s.clip_ready_timeout if timeout is None else timeout
         deadline = time.time() + max(1, timeout)
-        path = f"/api/events/{event_id}/clip.mp4"
+        path = f"/api/{camera}/start/{start_ts}/end/{end_ts}/clip.mp4"
         last_status = None
         last_body = ""
 
         while True:
             try:
-                r = self._session.get(f"{self._base}{path}", timeout=30)
+                r = self._session.get(f"{self._base}{path}", timeout=120)
                 last_status = r.status_code
                 if r.ok and len(r.content) > 1024:
                     return r.content
@@ -47,8 +53,10 @@ class FrigateClient:
 
             if time.time() >= deadline:
                 log.warning(
-                    "clip not ready event=%s after %ss: status=%s body=%s",
-                    event_id,
+                    "recording clip not ready camera=%s %.0f-%.0f after %ss: status=%s body=%s",
+                    camera,
+                    start_ts,
+                    end_ts,
                     timeout,
                     last_status,
                     last_body,
@@ -60,18 +68,32 @@ class FrigateClient:
         r = self.get("/api/stats")
         return r.json() if r else None
 
-    def events_with_clips(self, after_ts: int, limit: int = 20) -> list[dict]:
-        r = self.get(f"/api/events?has_clip=1&limit={limit}&after={after_ts}")
+    def reviews(self, after_ts: int, limit: int = 20) -> list[dict]:
+        params = [f"limit={limit}", f"after={after_ts}"]
+        if self._s.review_severity:
+            params.append(f"severity={self._s.review_severity}")
+        if self._s.camera:
+            params.append(f"cameras={self._s.camera}")
+        r = self.get(f"/api/review?{'&'.join(params)}")
         if not r:
             return []
         return r.json() or []
 
-    def latest_event_with_clip(self) -> dict | None:
-        r = self.get("/api/events?limit=1&has_clip=1")
+    def latest_review(self) -> dict | None:
+        params = ["limit=1"]
+        if self._s.review_severity:
+            params.append(f"severity={self._s.review_severity}")
+        if self._s.camera:
+            params.append(f"cameras={self._s.camera}")
+        r = self.get(f"/api/review?{'&'.join(params)}")
         if not r:
             return None
-        events = r.json() or []
-        return events[0] if events else None
+        reviews = r.json() or []
+        return reviews[0] if reviews else None
+
+    def review_preview(self, review_id: str) -> bytes | None:
+        r = self.get(f"/api/review/{review_id}/preview", timeout=30)
+        return r.content if r else None
 
     def event_snapshot(self, event_id: str) -> bytes | None:
         r = self.get(f"/api/events/{event_id}/snapshot.jpg", timeout=20)
@@ -81,6 +103,6 @@ class FrigateClient:
         r = self.get(f"/api/{self._s.camera}/latest.jpg?h={height}", timeout=15)
         return r.content if r else None
 
-    def events_summary(self) -> list[dict] | None:
-        r = self.get("/api/events/summary")
+    def reviews_summary(self) -> dict | None:
+        r = self.get("/api/review/summary")
         return r.json() if r else None

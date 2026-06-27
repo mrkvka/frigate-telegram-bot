@@ -6,7 +6,7 @@ import logging
 import time
 
 from bot.config import Settings
-from bot.events.service import EventService
+from bot.events.service import ReviewService
 from bot.frigate_client import FrigateClient
 from bot.telegram_client import TelegramClient
 
@@ -19,23 +19,23 @@ class CommandHandlers:
         settings: Settings,
         tg: TelegramClient,
         frigate: FrigateClient,
-        events: EventService,
+        reviews: ReviewService,
     ) -> None:
         self._s = settings
         self._tg = tg
         self._frigate = frigate
-        self._events = events
+        self._reviews = reviews
 
     def start(self, chat_id: int) -> None:
         self._tg.send_message(
             chat_id,
             "<b>🎥 Frigate Bot</b>\n"
-            "Я присылаю события с камеры и выполняю команды.\n\n"
-            "<b>Доступные команды:</b>\n"
-            "/status — статус камеры и детектора\n"
-            "/snapshot — текущий снимок с камеры\n"
-            "/last — последнее событие (видео)\n"
-            "/help — эта справка",
+            "Присылаю review-клипы с камеры (один клип на инцидент).\n\n"
+            "<b>Команды:</b>\n"
+            "/status — статус Frigate и камеры\n"
+            "/snapshot — текущий снимок\n"
+            "/last — последний review-клип\n"
+            "/help — справка",
         )
 
     def help(self, chat_id: int) -> None:
@@ -67,11 +67,12 @@ class CommandHandlers:
                 f"<b>🧠 Детектор {det_name or '?'}:</b>\n"
                 f"  inference: {det_info.get('inference_speed', '?')} мс"
             )
-            summary = self._frigate.events_summary()
+            summary = self._frigate.reviews_summary()
             if summary:
-                today = time.strftime("%Y-%m-%d")
-                today_count = sum(s.get("count", 0) for s in summary if s.get("day") == today)
-                text += f"\n\n<b>📈 Событий сегодня:</b> {today_count}"
+                last24 = summary.get("last24Hours") or {}
+                alerts = last24.get("total_alert", 0)
+                detections = last24.get("total_detection", 0)
+                text += f"\n\n<b>📈 Review за 24ч:</b> alerts {alerts}, detections {detections}"
             self._tg.send_message(chat_id, text)
         except Exception as e:
             log.exception("cmd_status error")
@@ -88,12 +89,12 @@ class CommandHandlers:
 
     def last(self, chat_id: int) -> None:
         self._tg.call("sendChatAction", chat_id=chat_id, action="upload_video")
-        ev = self._frigate.latest_event_with_clip()
-        if not ev:
-            self._tg.send_message(chat_id, "ℹ️ Нет событий с клипами")
+        review = self._frigate.latest_review()
+        if not review or not review.get("end_time"):
+            self._tg.send_message(chat_id, "ℹ️ Нет завершённых review")
             return
         try:
-            self._events.send_one(chat_id, ev, title="🎬 Последнее событие")
+            self._reviews.send_one(chat_id, review, title="🎬 Последний review")
         except Exception as e:
             log.exception("cmd_last error")
             self._tg.send_message(chat_id, f"❌ Ошибка: {e}")

@@ -1,4 +1,4 @@
-"""Подготовка и рассылка событий Frigate."""
+"""Подготовка и рассылка review-клипов Frigate."""
 
 from __future__ import annotations
 
@@ -16,25 +16,28 @@ log = logging.getLogger("frigate-bot")
 
 
 @dataclass(frozen=True)
-class PreparedEvent:
+class PreparedReview:
     caption: str
     video_bytes: bytes | None
     meta: VideoMeta | None
     error_suffix: str | None = None
 
 
-def build_caption(ev: dict, title: str = "🎬 Событие") -> tuple[str, int]:
-    label = ev.get("label", "?")
-    cam = ev.get("camera", "?")
-    data = ev.get("data") or {}
-    score = ev.get("top_score") or ev.get("score") or data.get("top_score") or data.get("score") or 0
-    start = ev.get("start_time", 0)
-    end = ev.get("end_time") or (start + 10)
-    duration = int(end - start) if end else 0
+def build_caption(review: dict, title: str = "🎬 Review") -> tuple[str, int]:
+    data = review.get("data") or {}
+    objects = data.get("objects") or ["?"]
+    labels = ", ".join(objects)
+    severity = review.get("severity", "?")
+    cam = review.get("camera", "?")
+    start = review.get("start_time", 0)
+    end = review.get("end_time") or start
+    duration = max(0, int(end - start))
     dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start))
+    severity_label = "🚨 Alert" if severity == "alert" else "ℹ️ Detection"
     caption = (
         f"<b>{title}</b>\n"
-        f"Метка: <b>{label}</b> ({score * 100:.0f}%)\n"
+        f"Объекты: <b>{labels}</b>\n"
+        f"Тип: {severity_label}\n"
         f"Камера: {cam}\n"
         f"Время: {dt}\n"
         f"Длительность: ~{duration}с"
@@ -42,7 +45,7 @@ def build_caption(ev: dict, title: str = "🎬 Событие") -> tuple[str, in
     return caption, duration
 
 
-class EventService:
+class ReviewService:
     def __init__(
         self,
         settings: Settings,
@@ -53,40 +56,50 @@ class EventService:
         self._tg = tg
         self._frigate = frigate
 
-    def prepare(self, ev: dict, title: str = "🎬 Событие") -> PreparedEvent:
-        caption, duration = build_caption(ev, title=title)
-        eid = ev.get("id")
-        raw = self._frigate.wait_for_clip(eid)
+    def prepare(self, review: dict, title: str = "🎬 Review") -> PreparedReview:
+        caption, duration = build_caption(review, title=title)
+        camera = review.get("camera") or self._s.camera
+        start = review.get("start_time", 0)
+        end = review.get("end_time") or start
+        raw = self._frigate.wait_for_recording_clip(camera, start, end)
         if not raw:
-            return PreparedEvent(caption, None, None, error_suffix="\n\n⚠️ Записи для клипа нет")
+            return PreparedReview(caption, None, None, error_suffix="\n\n⚠️ Записи для клипа нет")
 
         video_bytes, meta = normalize_for_telegram(raw, duration, self._s)
         max_bytes = self._s.max_video_mb * 1024 * 1024
         if len(video_bytes) > max_bytes:
             suffix = f"\n\n⚠️ Клип слишком большой ({len(video_bytes) // 1024 // 1024}MB)"
-            return PreparedEvent(caption, None, meta, error_suffix=suffix)
-        return PreparedEvent(caption, video_bytes, meta)
+            return PreparedReview(caption, None, meta, error_suffix=suffix)
+        return PreparedReview(caption, video_bytes, meta)
 
-    def _notify_missing(self, prepared: PreparedEvent, chat_ids: frozenset[int], event_id: str) -> None:
+    def _notify_missing(self, prepared: PreparedReview, chat_ids: frozenset[int], review: dict) -> None:
         suffix = prepared.error_suffix or ""
         if self._s.send_snapshot_on_missing_clip and "нет" in suffix:
-            snap = self._frigate.event_snapshot(event_id)
-            if snap:
-                suffix = "\n\n⚠️ Записи для клипа нет, отправляю snapshot."
+            preview = self._frigate.review_preview(review.get("id", ""))
+            if preview:
+                suffix = "\n\n⚠️ Записи для клипа нет, отправляю preview."
                 for uid in chat_ids:
-                    self._tg.send_photo(uid, snap, caption=prepared.caption + suffix)
+                    self._tg.send_photo(uid, preview, caption=prepared.caption + suffix)
                 return
+            detections = (review.get("data") or {}).get("detections") or []
+            if detections:
+                snap = self._frigate.event_snapshot(detections[0])
+                if snap:
+                    suffix = "\n\n⚠️ Записи для клипа нет, отправляю snapshot."
+                    for uid in chat_ids:
+                        self._tg.send_photo(uid, snap, caption=prepared.caption + suffix)
+                    return
         for uid in chat_ids:
             self._tg.send_message(uid, prepared.caption + suffix)
 
-    def broadcast(self, ev: dict, title: str = "🚨 Новое событие") -> tuple[int, int]:
-        eid = ev.get("id")
-        prepared = self.prepare(ev, title=title)
+    def broadcast(self, review: dict, title: str = "🚨 Новое событие") -> tuple[int, int]:
+        rid = review.get("id")
+        prepared = self.prepare(review, title=title)
         owners = self._s.owner_chat_ids
         total = len(owners)
 
         if not prepared.video_bytes:
-            self._notify_missing(prepared, owners, eid)
+            self._notify_missing(prepared, owners, review)
             return 0, total
 
         width = prepared.meta.width if prepared.meta else None
@@ -117,18 +130,18 @@ class EventService:
 
         sent = sum(1 for ok in results.values() if ok)
         log.info(
-            "broadcast event id=%s sent=%d/%d size=%dKB",
-            eid,
+            "broadcast review id=%s sent=%d/%d size=%dKB",
+            rid,
             sent,
             total,
             len(prepared.video_bytes) // 1024,
         )
         return sent, total
 
-    def send_one(self, chat_id: int, ev: dict, title: str = "🎬 Событие") -> bool:
-        prepared = self.prepare(ev, title=title)
+    def send_one(self, chat_id: int, review: dict, title: str = "🎬 Review") -> bool:
+        prepared = self.prepare(review, title=title)
         if not prepared.video_bytes:
-            self._notify_missing(prepared, frozenset({chat_id}), ev.get("id"))
+            self._notify_missing(prepared, frozenset({chat_id}), review)
             return False
         width = prepared.meta.width if prepared.meta else None
         height = prepared.meta.height if prepared.meta else None

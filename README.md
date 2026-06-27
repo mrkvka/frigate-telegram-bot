@@ -1,172 +1,104 @@
 # Frigate Telegram Bot
 
-Telegram-бот для [Frigate NVR](https://frigate.video): присылает клипы с камеры при обнаружении движения и отвечает на команды. Работает в Docker рядом с Frigate.
+Telegram-бот для [Frigate NVR](https://frigate.video): присылает **review-клипы** (один ролик на инцидент) и отвечает на команды. Работает в Docker рядом с Frigate.
 
 Образ: `ghcr.io/mrkvka/frigate-telegram-bot:latest`
 
 ## Что делает
 
-**Автоуведомления.** Бот опрашивает Frigate API, ждёт готовности клипа и отправляет MP4 всем владельцам (`OWNER_CHAT_ID`). Клип кодируется один раз на событие, рассылка идёт параллельно.
+**Review вместо events.** Frigate группирует все перекрывающиеся треки на одной камере в один review. Бот опрашивает `/api/review`, ждёт `end_time`, скачивает клип через Recording API и шлёт в Telegram. Два event id на одно движение больше не дают два сообщения.
 
-**Объединение событий.** Frigate иногда создаёт несколько event id на одно движение (кратковременная потеря трека). Бот группирует перекрывающиеся события с одной меткой и камерой и шлёт один клип — самый длинный из группы.
+**Нормализация видео.** ffmpeg: H.264 + AAC, loudnorm, опционально RNNoise. Передаются `width`/`height`/`supports_streaming` для корректного inline-воспроизведения.
 
-**Нормализация видео.** Frigate отдаёт клип как есть; бот при необходимости прогоняет через ffmpeg: H.264 + AAC, loudnorm, опционально RNNoise (`arnndn`). В Telegram передаются `width`, `height`, `supports_streaming` — видео не становится квадратным и воспроизводится inline.
+**Надёжная доставка.** Retry `sendVideo`, fallback `sendDocument`, параллельная рассылка всем владельцам с одной кодировкой клипа.
 
-**Надёжная доставка.** До 5 попыток `sendVideo`, fallback на `sendDocument`, динамический таймаут загрузки по размеру файла.
+**Мониторинг Frigate.** Health-check API, fps, свежесть записей, опциональный autorestart контейнера.
 
-**Мониторинг Frigate.** Фоновый поток проверяет API, fps камеры и свежесть записей. При зависании — уведомление в Telegram и опциональный рестарт контейнера Frigate через docker.sock.
-
-**Команды** (только для владельцев):
+**Команды** (только `OWNER_CHAT_ID`):
 
 | Команда | Действие |
 |---|---|
 | `/start`, `/help` | Справка |
-| `/status` | Версия Frigate, uptime, fps, inference, события за сегодня |
-| `/snapshot` | Текущий кадр с камеры |
-| `/last` | Последнее событие с клипом |
+| `/status` | Frigate, fps, review за 24ч |
+| `/snapshot` | Текущий кадр |
+| `/last` | Последний review-клип |
 
-## Структура проекта
-
-```
-bot/
-├── app.py              # long-polling Telegram + запуск фоновых потоков
-├── config.py           # настройки из env
-├── telegram_client.py  # API Telegram, retry, fallback
-├── frigate_client.py   # API Frigate
-├── events/
-│   ├── watcher.py      # опрос новых событий
-│   ├── merge.py        # объединение дубликатов
-│   └── service.py      # подготовка клипа + broadcast
-├── media/video.py      # ffmpeg/ffprobe
-├── commands/handlers.py
-└── monitor/health.py   # health-check + autorestart
-```
-
-`bot.py` — legacy-обёртка для совместимости; точка входа: `python -m bot`.
-
-## Требования
-
-- Frigate 0.17+ с записью событий (detections/alerts)
-- Docker и docker compose на хосте с Frigate
-- Токен бота от [@BotFather](https://t.me/BotFather)
-- Chat ID владельца(ев)
-
-## Установка
-
-### 1. Frigate: длина клипа
-
-В `config.yml` Frigate задай отступы до/после движения (секунды):
+## Frigate: обязательный конфиг
 
 ```yaml
+review:
+  alerts:
+    labels:
+      - person
+      - car
+
 record:
   alerts:
-    pre_capture: 1
-    post_capture: 1
+    pre_capture: 1    # секунд до движения
+    post_capture: 1   # секунд после
   detections:
     pre_capture: 1
     post_capture: 1
 ```
 
-Пример полного конфига — `config.example.yml` (go2rtc, sub-stream для detect, main для record).
+`pre_capture`/`post_capture` управляют тем, какие сегменты записи сохраняются. Клип в Telegram строится по `start_time`/`end_time` review через:
 
-### 2. Бот
+```
+GET /api/{camera}/start/{start}/end/{end}/clip.mp4
+```
+
+Полный пример — `config.example.yml`.
+
+## Установка
 
 ```bash
 git clone https://github.com/mrkvka/frigate-telegram-bot.git
 cd frigate-telegram-bot
 cp .env.example .env
-# заполни BOT_TOKEN и OWNER_CHAT_ID
+# BOT_TOKEN, OWNER_CHAT_ID
+docker network create --subnet=172.30.55.0/24 frigate_tg_bot_net  # если нет
+docker compose build && docker compose up -d
 ```
 
-Создай сеть (если ещё нет):
-
-```bash
-docker network create --subnet=172.30.55.0/24 frigate_tg_bot_net
-```
-
-Проверь пути в `docker-compose.yml` — volumes должны указывать на каталог Frigate на хосте:
+Volumes в `docker-compose.yml` должны указывать на Frigate на хосте:
 
 ```yaml
 volumes:
   - /opt/frigate/media/recordings:/media/frigate/recordings:ro
   - /opt/frigate/config:/frigate_config:ro
-  - /var/run/docker.sock:/var/run/docker.sock:ro   # для autorestart
+  - /var/run/docker.sock:/var/run/docker.sock:ro
 ```
-
-```bash
-docker compose build
-docker compose up -d
-```
-
-### 3. Chat ID
-
-Напиши боту `/start`, затем:
-
-```
-https://api.telegram.org/bot<TOKEN>/getUpdates
-```
-
-В ответе: `result[].message.chat.id`.
-
-Несколько получателей: `OWNER_CHAT_ID=111,222,333`
 
 ## Переменные окружения
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `BOT_TOKEN` | — | Токен бота (обязательно) |
-| `OWNER_CHAT_ID` | — | Chat ID, через запятую (обязательно) |
-| `FRIGATE_URL` | `http://frigate:5000` | URL API Frigate |
-| `CAMERA` | `front` | Имя камеры в конфиге Frigate |
-| `AUTO_EVENTS` | `1` | Автоотправка новых событий |
-| `EVENT_POLL_SECS` | `10` | Интервал опроса Frigate |
-| `CLIP_WAIT_SECS` | `10` | Пауза после end_time перед скачиванием клипа |
-| `EVENT_MERGE_GAP_SECS` | `30` | Объединять события, если gap между ними меньше (с) |
-| `FIX_TELEGRAM_VIDEO` | `1` | Перекодировать клип для Telegram |
-| `VIDEO_FIX_WIDTH` | `0` | Ширина (0 = без ресайза) |
-| `VIDEO_FIX_CRF` | `23` | Качество H.264 |
-| `MAX_VIDEO_MB` | `45` | Лимит размера (Telegram — 50 MB) |
-| `SEND_VIDEO_RETRIES` | `5` | Попытки отправки видео |
-| `MONITOR_ENABLED` | `1` | Health-мониторинг Frigate |
-| `FRIGATE_AUTORESTART` | `1` | Рестарт контейнера Frigate при сбое |
-| `FRIGATE_CONTAINER` | `frigate` | Имя контейнера Frigate |
-| `TG_API_BASE` | `https://api.telegram.org` | Альтернативный endpoint Telegram |
+| `BOT_TOKEN` | — | Токен от @BotFather |
+| `OWNER_CHAT_ID` | — | Chat ID через запятую |
+| `FRIGATE_URL` | `http://frigate:5000` | URL Frigate |
+| `CAMERA` | `front` | Камера в конфиге |
+| `AUTO_REVIEWS` | `1` | Автоотправка review |
+| `REVIEW_SEVERITY` | `alert` | `alert` или `detection` |
+| `REVIEW_POLL_SECS` | `10` | Интервал опроса |
+| `CLIP_WAIT_SECS` | `10` | Пауза после end_time |
+| `FIX_TELEGRAM_VIDEO` | `1` | Перекодировать для TG |
+| `VIDEO_FIX_WIDTH` | `0` | 0 = без ресайза |
+| `MAX_VIDEO_MB` | `45` | Лимит размера |
 
-Полный список — в `.env.example`.
+Полный список — `.env.example`. `AUTO_EVENTS` и `EVENT_POLL_SECS` поддерживаются как alias.
 
-## Как это работает (кратко)
+## Как работает
 
 ```
-Frigate detect → event end_time → watcher ждёт CLIP_WAIT_SECS
-    → merge дубликатов → скачать clip MP4 → ffmpeg normalize (1 раз)
-    → sendVideo всем OWNER_CHAT_ID параллельно
+Frigate: треки → один review (start/end)
+    → бот ждёт end_time + CLIP_WAIT_SECS
+    → GET /api/{cam}/start/{start}/end/{end}/clip.mp4
+    → ffmpeg normalize → sendVideo всем владельцам
 ```
 
-Клип Frigate = движение + `pre_capture` + `post_capture` из конфига записи.
+## Chat ID
 
-## Сборка образа
-
-Push в `main` или тег `v*` собирает multi-arch образ в GHCR через GitHub Actions.
-
-Локально:
-
-```bash
-docker build -t frigate-telegram-bot:1.0.0 .
-```
-
-## Логи и диагностика
-
-```bash
-docker logs -f frigate-telegram-bot
-```
-
-Полезные строки:
-
-- `event_watcher started` — автоотправка включена
-- `merged N events` — сработало объединение дубликатов
-- `broadcast event id=... sent=2/2` — успешная рассылка
-
-Если видео не доходит — нестабильный канал до `api.telegram.org`. Попробуй `TG_API_BASE` через прокси (см. `README-proxy.md`) или увеличь `SEND_VIDEO_RETRIES`.
+Напиши боту `/start`, затем `https://api.telegram.org/bot<TOKEN>/getUpdates` → `message.chat.id`.
 
 ## Лицензия
 
