@@ -1,0 +1,26 @@
+services:
+  frigate-telegram-bot:
+    build: .
+    image: frigate-telegram-bot:1.0.0
+    container_name: frigate-telegram-bot
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os,time,sys; age=time.time()-os.path.getmtime('/tmp/bot_alive'); sys.exit(0 if age<120 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    env_file:
+      - .env
+    volumes:
+      - /opt/frigate/media/recordings:/media/frigate/recordings:ro
+      - /opt/frigate/config:/frigate_config:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      bot_net:
+        ipv4_address: 172.30.55.10
+
+networks:
+  bot_net:
+    external: true
+    name: frigate_tg_bot_net

@@ -1,0 +1,72 @@
+# Пример конфига Frigate для работы с ботом.
+# Скопируй в /opt/frigate/config/config.yml и подставь свои IP/пароли.
+
+mqtt:
+  enabled: false
+
+detectors:
+  cpu1:
+    type: cpu
+    num_threads: 2
+
+go2rtc:
+  rtsp:
+    listen: ':8554'
+  streams:
+    front:
+      - ffmpeg:rtsp://CAMERA_IP:554/ch01.264#video=copy#audio=pcmu
+
+objects:
+  track:
+    - person
+    - car
+  filters:
+    person:
+      min_score: 0.45
+      threshold: 0.65
+
+record:
+  enabled: true
+  continuous:
+    days: 7
+  alerts:
+    pre_capture: 1
+    post_capture: 1
+    retain:
+      days: 7
+      mode: all
+  detections:
+    pre_capture: 1
+    post_capture: 1
+    retain:
+      days: 7
+      mode: all
+
+cameras:
+  front:
+    ffmpeg:
+      output_args:
+        detect: -f rawvideo -pix_fmt yuv420p -vf crop=640:360:0:60
+        record: -f segment -segment_time 10 -segment_format mp4 -reset_timestamps 1 -strftime 1 -c:v copy -c:a aac -ar 48000 -b:a 128k -af aresample=async=1000
+      inputs:
+        - path: rtsp://CAMERA_IP:554/ch01_sub.264
+          roles:
+            - detect
+        - path: rtsp://127.0.0.1:8554/front
+          input_args: preset-rtsp-restream
+          roles:
+            - record
+    detect:
+      enabled: true
+      width: 640
+      height: 360
+      fps: 5
+    live:
+      streams:
+        front: front
+    record:
+      enabled: true
+    snapshots:
+      enabled: true
+
+version: 0.17-0
